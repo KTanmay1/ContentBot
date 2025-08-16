@@ -163,6 +163,9 @@ cred.json
 !requirements.txt
 !package.json
 
+# Specific credential files
+cred.json
+
 # Database
 *.db
 *.sqlite
