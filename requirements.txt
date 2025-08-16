@@ -1,0 +1,62 @@
+# Core Dependencies
+fastapi>=0.112
+uvicorn[standard]>=0.30
+pydantic>=2.7,<3.0
+pydantic-settings==2.1.0
+python-multipart==0.0.6
+
+# Streamlit
+streamlit>=1.28.0
+streamlit-option-menu>=0.3.6
+streamlit-aggrid>=0.3.4
+plotly>=5.17.0
+altair>=5.1.0
+
+# Database
+sqlalchemy==2.0.23
+alembic==1.12.1
+asyncpg==0.29.0
+redis==5.0.1
+
+# AI Services
+google-generativeai==0.3.2
+google-cloud-aiplatform==1.38.1
+pillow==10.1.0
+aiofiles==23.2.1
+
+# Hugging Face Inference API for free image generation
+huggingface-hub>=0.19.0
+
+# HTTP Client
+httpx>=0.27
+aiohttp==3.9.1
+
+# Workflow Engine
+langgraph>=0.2
+
+# Testing
+pytest>=8.2
+pytest-asyncio==0.21.1
+pytest-mock==3.12.0
+pytest-cov==4.1.0
+
+# Development
+black==23.11.0
+flake8==6.1.0
+mypy==1.7.1
+pre-commit==3.5.0
+
+# Additional utilities for Streamlit
+pandas>=2.1.0
+numpy>=1.24.0
+markdown>=3.5.0
+beautifulsoup4>=4.12.0
+
+# Monitoring
+prometheus-client==0.19.0
+python-json-logger==2.0.7
+
+# Security
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-dotenv==1.0.0

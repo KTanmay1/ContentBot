@@ -1,0 +1,534 @@
+# Kubernetes deployment configuration for ViraLearn ContentBot
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: viralearn
+  labels:
+    name: viralearn
+    app: contentbot
+
+---
+# ConfigMap for application configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: contentbot-config
+  namespace: viralearn
+data:
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "INFO"
+  DATABASE_HOST: "postgres-service"
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: "contentbot_db"
+  REDIS_HOST: "redis-service"
+  REDIS_PORT: "6379"
+  PORT: "8000"
+
+---
+# Secret for sensitive data
+apiVersion: v1
+kind: Secret
+metadata:
+  name: contentbot-secrets
+  namespace: viralearn
+type: Opaque
+data:
+  # Base64 encoded values - replace with actual encoded secrets
+  DATABASE_PASSWORD: Y29udGVudGJvdF9wYXNzd29yZA==  # contentbot_password
+  REDIS_PASSWORD: cmVkaXNfcGFzc3dvcmQ=  # redis_password
+  API_KEY_SECRET: eW91ci1zZWNyZXQta2V5LWhlcmU=  # your-secret-key-here
+  JWT_SECRET: eW91ci1qd3Qtc2VjcmV0LWhlcmU=  # your-jwt-secret-here
+  # Add your actual API keys here (base64 encoded)
+  # OPENAI_API_KEY: <base64-encoded-openai-key>
+  # ANTHROPIC_API_KEY: <base64-encoded-anthropic-key>
+
+---
+# PostgreSQL Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-deployment
+  namespace: viralearn
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: contentbot-config
+              key: DATABASE_NAME
+        - name: POSTGRES_USER
+          value: "contentbot"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: contentbot-secrets
+              key: DATABASE_PASSWORD
+        - name: POSTGRES_INITDB_ARGS
+          value: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - contentbot
+            - -d
+            - contentbot_db
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - contentbot
+            - -d
+            - contentbot_db
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: postgres-storage
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+
+---
+# PostgreSQL Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: viralearn
+spec:
+  selector:
+    app: postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+  type: ClusterIP
+
+---
+# PostgreSQL PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: viralearn
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard
+
+---
+# Redis Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-deployment
+  namespace: viralearn
+  labels:
+    app: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+        command:
+        - redis-server
+        - --appendonly
+        - "yes"
+        - --requirepass
+        - $(REDIS_PASSWORD)
+        env:
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: contentbot-secrets
+              key: REDIS_PASSWORD
+        volumeMounts:
+        - name: redis-storage
+          mountPath: /data
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "125m"
+          limits:
+            memory: "256Mi"
+            cpu: "250m"
+        livenessProbe:
+          exec:
+            command:
+            - redis-cli
+            - -a
+            - $(REDIS_PASSWORD)
+            - ping
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - -a
+            - $(REDIS_PASSWORD)
+            - ping
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: redis-storage
+        persistentVolumeClaim:
+          claimName: redis-pvc
+
+---
+# Redis Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: viralearn
+spec:
+  selector:
+    app: redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+  type: ClusterIP
+
+---
+# Redis PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-pvc
+  namespace: viralearn
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: standard
+
+---
+# ContentBot Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: contentbot-deployment
+  namespace: viralearn
+  labels:
+    app: contentbot
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: contentbot
+  template:
+    metadata:
+      labels:
+        app: contentbot
+    spec:
+      containers:
+      - name: contentbot
+        image: viralearn/contentbot:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          value: "postgresql://contentbot:$(DATABASE_PASSWORD)@$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)"
+        - name: REDIS_URL
+          value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):$(REDIS_PORT)/0"
+        envFrom:
+        - configMapRef:
+            name: contentbot-config
+        - secretRef:
+            name: contentbot-secrets
+        volumeMounts:
+        - name: app-logs
+          mountPath: /app/logs
+        - name: app-data
+          mountPath: /app/data
+        - name: app-uploads
+          mountPath: /app/uploads
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+      volumes:
+      - name: app-logs
+        persistentVolumeClaim:
+          claimName: contentbot-logs-pvc
+      - name: app-data
+        persistentVolumeClaim:
+          claimName: contentbot-data-pvc
+      - name: app-uploads
+        persistentVolumeClaim:
+          claimName: contentbot-uploads-pvc
+      initContainers:
+      - name: wait-for-postgres
+        image: postgres:15-alpine
+        command:
+        - sh
+        - -c
+        - |
+          until pg_isready -h $DATABASE_HOST -p $DATABASE_PORT -U contentbot; do
+            echo "Waiting for PostgreSQL..."
+            sleep 2
+          done
+        envFrom:
+        - configMapRef:
+            name: contentbot-config
+      - name: wait-for-redis
+        image: redis:7-alpine
+        command:
+        - sh
+        - -c
+        - |
+          until redis-cli -h $REDIS_HOST -p $REDIS_PORT -a $REDIS_PASSWORD ping; do
+            echo "Waiting for Redis..."
+            sleep 2
+          done
+        envFrom:
+        - configMapRef:
+            name: contentbot-config
+        - secretRef:
+            name: contentbot-secrets
+
+---
+# ContentBot Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: contentbot-service
+  namespace: viralearn
+  labels:
+    app: contentbot
+spec:
+  selector:
+    app: contentbot
+  ports:
+  - port: 80
+    targetPort: 8000
+    protocol: TCP
+  type: ClusterIP
+
+---
+# ContentBot PVCs
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: contentbot-logs-pvc
+  namespace: viralearn
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: standard
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: contentbot-data-pvc
+  namespace: viralearn
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: contentbot-uploads-pvc
+  namespace: viralearn
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: standard
+
+---
+# Ingress for external access
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: contentbot-ingress
+  namespace: viralearn
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+spec:
+  tls:
+  - hosts:
+    - api.viralearn.com
+    secretName: contentbot-tls
+  rules:
+  - host: api.viralearn.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: contentbot-service
+            port:
+              number: 80
+
+---
+# HorizontalPodAutoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: contentbot-hpa
+  namespace: viralearn
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: contentbot-deployment
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+
+---
+# NetworkPolicy for security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: contentbot-network-policy
+  namespace: viralearn
+spec:
+  podSelector:
+    matchLabels:
+      app: contentbot
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8000
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: postgres
+    ports:
+    - protocol: TCP
+      port: 5432
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis
+    ports:
+    - protocol: TCP
+      port: 6379
+  - to: []  # Allow external API calls
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
