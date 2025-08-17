@@ -14,13 +14,17 @@ class ImageGenerator(BaseAgent):
     
     def __init__(self, *, name: Optional[str] = None, image_service: Optional[ImageService] = None):
         super().__init__(name=name)
-        self.image_service = image_service or ImageService()
+        self.image_service = image_service or ImageService(provider="huggingface")
     
-    async def execute(self, state: ContentState) -> AgentResult:
+    def execute(self, state: ContentState) -> ContentState:
         """Generate images based on the current state."""
         try:
             # Initialize image service if needed
-            await self.image_service.initialize()
+            try:
+                asyncio.run(self.image_service.initialize())
+            except RuntimeError:
+                # If we're already in an event loop, skip initialization
+                pass
             
             # Extract image requirements from state
             topic = state.original_input.get("text", state.original_input.get("topic", ""))
@@ -40,40 +44,33 @@ class ImageGenerator(BaseAgent):
             style = self._determine_image_style(content_type, platform, plan)
             
             # Create image generation request
+            width, height = self._get_image_size(platform)
             request = ImageGenerationRequest(
                 prompt=image_prompt,
                 style=style,
                 aspect_ratio=self._get_aspect_ratio(platform),
-                size=self._get_image_size(platform),
+                width=width,
+                height=height,
                 format=ImageFormat.JPEG,
-                quality=90
+                num_images=1
             )
             
             # Generate image using image service
-            image_result = await self.image_service.generate_image(request)
+            try:
+                image_result = asyncio.run(self.image_service.generate_image(request))
+            except Exception as img_error:
+                # Fallback when image service fails
+                state.image_content["error"] = f"Image generation failed: {str(img_error)}"
+                state.image_content["generated"] = None
+                state.image_content["prompt_used"] = image_prompt
+                state.image_content["fallback_used"] = True
+                return state
             
-            # Save the image to a temporary file for display
-            import tempfile
-            import os
-            from pathlib import Path
-            
-            # Create temp directory if it doesn't exist
-            temp_dir = Path("temp_images")
-            temp_dir.mkdir(exist_ok=True)
-            
-            # Generate unique filename
-            import uuid
-            filename = f"generated_{uuid.uuid4().hex[:8]}.{request.format.value}"
-            image_path = temp_dir / filename
-            
-            # Save the first image from the response
+            # The Hugging Face service returns data URLs (base64-encoded strings)
+            # Pass the first generated image directly to the frontend
             if image_result.images:
-                with open(image_path, 'wb') as f:
-                    f.write(image_result.images[0])
-                
-                # Store file path and metadata in state
-                state.image_content["generated"] = str(image_path)
-                state.image_content["image_bytes"] = image_result.images[0]  # Keep bytes for other uses
+                # Store data URL in state for frontend to render
+                state.image_content["generated"] = image_result.images[0]
             else:
                 state.image_content["generated"] = None
                 state.image_content["error"] = "No image data received"
@@ -82,23 +79,18 @@ class ImageGenerator(BaseAgent):
             state.image_content["content_type"] = content_type
             state.image_content["style"] = style.value
             state.image_content["platform"] = platform
-            state.image_content["metadata"] = image_result.metadata
+            state.image_content["metadata"] = {"provider": image_result.provider}
             state.image_content["generation_time"] = image_result.generation_time
             state.image_content["model"] = image_result.model
             
-            return AgentResult(
-                success=True,
-                state=state,
-                data={"image_generated": True, "prompt": image_prompt},
-                message="Image generated successfully"
-            )
+            return state
             
         except Exception as e:
             # Handle generation errors gracefully
             state.image_content["error"] = str(e)
             state.image_content["generated"] = None
-            
-            raise AgentException(f"Image generation failed: {str(e)}")
+            state.image_content["fallback_used"] = True
+            return state
     
     def _create_image_prompt(self, topic: str, content_type: str, platform: str, plan: dict, text_content: str) -> str:
         """Create a prompt for image generation."""
@@ -208,13 +200,15 @@ class ImageGenerator(BaseAgent):
             variant_prompt = f"{base_prompt}\n\nVariant {i+1}: Add unique creative elements"
             
             try:
+                width, height = self._get_image_size(platform)
                 request = ImageGenerationRequest(
                     prompt=variant_prompt,
                     style=style,
                     aspect_ratio=self._get_aspect_ratio(platform),
-                    size=self._get_image_size(platform),
+                    width=width,
+                    height=height,
                     format=ImageFormat.JPEG,
-                    quality=90
+                    num_images=1
                 )
                 
                 image_result = await self.image_service.generate_image(request)

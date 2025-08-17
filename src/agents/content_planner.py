@@ -23,7 +23,7 @@ class ContentPlanner(BaseAgent):
             llm_service: LLM service for content planning
         """
         super().__init__()
-        self.llm_service = llm_service or LLMService()
+        self.llm_service = llm_service or LLMService(provider="mistral")
         self.agent_name = "ContentPlanner"
     
     def execute(self, state: ContentState) -> ContentState:
@@ -40,19 +40,14 @@ class ContentPlanner(BaseAgent):
             analysis_data = state.analysis_data or {}
             original_input = state.original_input or {}
             
-            # Create content strategy
-            import asyncio
-            try:
-                strategy = asyncio.run(self.create_strategy(analysis_data, original_input))
-                
-                # Plan content structure
-                content_plan = asyncio.run(self.plan_content(strategy, analysis_data))
-                
-                # Generate content outline
-                outline = asyncio.run(self.generate_outline(content_plan, analysis_data))
-            except RuntimeError:
-                # If we're already in an event loop, raise the exception
-                raise AgentException("Content planning failed: Cannot run async methods in sync context")
+            # Create content strategy using sync methods
+            strategy = self.create_strategy_sync(analysis_data, original_input)
+            
+            # Plan content structure
+            content_plan = self.plan_content_sync(strategy, analysis_data)
+            
+            # Generate content outline
+            outline = self.generate_outline_sync(content_plan, analysis_data)
             
             # Create platform-specific adaptations
             platform_plans = self.create_platform_plans(content_plan, analysis_data)
@@ -69,7 +64,7 @@ class ContentPlanner(BaseAgent):
             # Update state with planning results
             if not state.platform_content:
                 state.platform_content = {}
-            state.platform_content.update(planning_data)
+            state.platform_content["plan"] = planning_data
             
             return state
             
@@ -108,7 +103,10 @@ class ContentPlanner(BaseAgent):
             - "success_metrics": how to measure success
             """
             
-            response = await self.llm_service.generate_text(prompt)
+            from src.services.llm_service import GenerationRequest
+            request = GenerationRequest(prompt=prompt)
+            response_obj = await self.llm_service.generate_content(request)
+            response = response_obj.content
             
             import json
             try:
@@ -150,7 +148,10 @@ class ContentPlanner(BaseAgent):
             - "seo_focus": primary SEO keywords to target
             """
             
-            response = await self.llm_service.generate_text(prompt)
+            from src.services.llm_service import GenerationRequest
+            request = GenerationRequest(prompt=prompt)
+            response_obj = await self.llm_service.generate_content(request)
+            response = response_obj.content
             
             import json
             try:
@@ -190,7 +191,10 @@ class ContentPlanner(BaseAgent):
             - "estimated_length": estimated content length
             """
             
-            response = await self.llm_service.generate_text(prompt)
+            from src.services.llm_service import GenerationRequest
+            request = GenerationRequest(prompt=prompt)
+            response_obj = await self.llm_service.generate_content(request)
+            response = response_obj.content
             
             import json
             try:
@@ -281,3 +285,153 @@ class ContentPlanner(BaseAgent):
         """
         # Check if analysis data exists
         return bool(state.analysis_data and state.original_input)
+    
+    def create_strategy_sync(self, analysis_data: Dict[str, Any], original_input: Dict[str, Any]) -> Dict[str, Any]:
+        """Synchronous version of create_strategy."""
+        try:
+            themes = analysis_data.get("themes", [])
+            sentiment = analysis_data.get("sentiment", {})
+            target_audience = analysis_data.get("target_audience", {})
+            content_type = analysis_data.get("content_type", "general_content")
+            
+            prompt = f"""
+            Create a content strategy based on the following analysis:
+            - Themes: {', '.join(themes)}
+            - Sentiment: {sentiment.get('polarity', 'neutral')}
+            - Content Type: {content_type}
+            - Target Audience: {target_audience}
+            - Original Request: {original_input.get('text', '')}
+            
+            Respond with a JSON object containing:
+            - "objective": main goal of the content
+            - "key_messages": list of 3-5 key messages
+            - "tone": recommended tone (formal, casual, professional, etc.)
+            - "approach": content approach (educational, promotional, informational, etc.)
+            - "success_metrics": how to measure success
+            """
+            
+            from src.services.llm_service import GenerationRequest
+            request = GenerationRequest(prompt=prompt)
+            response_obj = self.llm_service.generate_content_sync(request)
+            response = response_obj.content
+            
+            import json
+            try:
+                strategy = json.loads(response)
+                return strategy
+            except json.JSONDecodeError:
+                return self._fallback_strategy(analysis_data, original_input)
+                
+        except Exception:
+            return self._fallback_strategy(analysis_data, original_input)
+    
+    def plan_content_sync(self, strategy: Dict[str, Any], analysis_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Synchronous version of plan_content."""
+        try:
+            content_type = analysis_data.get("content_type", "general_content")
+            themes = analysis_data.get("themes", [])
+            keywords = analysis_data.get("keywords", [])
+            
+            prompt = f"""
+            Create a detailed content plan based on:
+            - Strategy: {strategy}
+            - Content Type: {content_type}
+            - Themes: {', '.join(themes)}
+            - Keywords: {', '.join(keywords[:10])}
+            
+            Respond with a JSON object containing:
+            - "structure": content structure (introduction, body, conclusion, etc.)
+            - "word_count": recommended word count
+            - "sections": list of main sections with descriptions
+            - "call_to_action": recommended call-to-action
+            - "seo_focus": primary SEO keywords to target
+            """
+            
+            from src.services.llm_service import GenerationRequest
+            request = GenerationRequest(prompt=prompt)
+            response_obj = self.llm_service.generate_content_sync(request)
+            response = response_obj.content
+            
+            import json
+            try:
+                content_plan = json.loads(response)
+                return content_plan
+            except json.JSONDecodeError:
+                return self._fallback_content_plan(strategy, analysis_data)
+                
+        except Exception:
+            return self._fallback_content_plan(strategy, analysis_data)
+    
+    def generate_outline_sync(self, content_plan: Dict[str, Any], analysis_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Synchronous version of generate_outline."""
+        try:
+            sections = content_plan.get("sections", [])
+            themes = analysis_data.get("themes", [])
+            
+            prompt = f"""
+            Create a detailed outline based on:
+            - Content Plan: {content_plan}
+            - Themes: {', '.join(themes)}
+            
+            Respond with a JSON object containing:
+            - "title": suggested title
+            - "subtitle": optional subtitle
+            - "introduction": introduction outline
+            - "main_points": list of main points with sub-points
+            - "conclusion": conclusion outline
+            - "estimated_length": estimated content length
+            """
+            
+            from src.services.llm_service import GenerationRequest
+            request = GenerationRequest(prompt=prompt)
+            response_obj = self.llm_service.generate_content_sync(request)
+            response = response_obj.content
+            
+            import json
+            try:
+                outline = json.loads(response)
+                return outline
+            except json.JSONDecodeError:
+                return self._fallback_outline(content_plan, analysis_data)
+                
+        except Exception:
+            return self._fallback_outline(content_plan, analysis_data)
+    
+    def _fallback_strategy(self, analysis_data: Dict[str, Any], original_input: Dict[str, Any]) -> Dict[str, Any]:
+        """Fallback strategy when LLM fails."""
+        return {
+            "objective": "Create engaging content based on user requirements",
+            "key_messages": analysis_data.get("themes", ["informative", "engaging", "valuable"]),
+            "tone": "professional",
+            "approach": "informational",
+            "success_metrics": ["engagement", "readability", "relevance"]
+        }
+    
+    def _fallback_content_plan(self, strategy: Dict[str, Any], analysis_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Fallback content plan when LLM fails."""
+        return {
+            "structure": ["introduction", "main_content", "conclusion"],
+            "word_count": 800,
+            "sections": [
+                {"title": "Introduction", "description": "Opening section"},
+                {"title": "Main Content", "description": "Core information"},
+                {"title": "Conclusion", "description": "Summary and next steps"}
+            ],
+            "call_to_action": "Learn more about this topic",
+            "seo_focus": analysis_data.get("themes", [])
+        }
+    
+    def _fallback_outline(self, content_plan: Dict[str, Any], analysis_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Fallback outline when LLM fails."""
+        return {
+            "title": "Comprehensive Guide",
+            "subtitle": "Everything you need to know",
+            "introduction": "Brief overview of the topic",
+            "main_points": [
+                {"point": "Key concept 1", "details": "Supporting information"},
+                {"point": "Key concept 2", "details": "Supporting information"},
+                {"point": "Key concept 3", "details": "Supporting information"}
+            ],
+            "conclusion": "Summary of key takeaways",
+            "estimated_length": content_plan.get("word_count", 800)
+        }

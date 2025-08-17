@@ -23,6 +23,7 @@ google-generativeai==0.3.2
 google-cloud-aiplatform==1.38.1
 pillow==10.1.0
 aiofiles==23.2.1
+mistralai>=1.0.0
 
 # Hugging Face Inference API for free image generation
 huggingface-hub>=0.19.0
@@ -30,6 +31,7 @@ huggingface-hub>=0.19.0
 # HTTP Client
 httpx>=0.27
 aiohttp==3.9.1
+requests>=2.31
 
 # Workflow Engine
 langgraph>=0.2

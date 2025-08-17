@@ -277,45 +277,49 @@ async def generate_blog_post(
         # Validate input
         validate_workflow_input(request)
         
-        # Create workflow for blog generation
-        workflow_request = CreateWorkflowRequest(
-            input=request,
+        # Create workflow for blog generation using workflow coordinator
+        from uuid import uuid4
+        from src.agents.workflow_coordinator import WorkflowCoordinator
+        from src.models import ContentState
+        
+        workflow_id = str(uuid4())
+        # Structure input for agents - they expect "text" field in original_input
+        structured_input = {
+            "text": request.get("text_content", ""),
+            "content_type": request.get("content_type", "blog_post"),
+            "platform": request.get("platform", "blog"),
+            "llm_model": request.get("llm_model", "mistral")
+        }
+        
+        state = ContentState(
+            workflow_id=workflow_id, 
+            status="initiated", 
+            original_input=structured_input, 
             user_id=user_id
         )
         
-        # Start workflow
-        workflow_result = await workflow_engine.create_workflow(workflow_request.dict())
+        # Execute workflow using coordinator
+        coordinator = WorkflowCoordinator()
+        result = coordinator.run(state)
         
-        if not workflow_result.get("success"):
-            raise AgentException("Failed to create blog generation workflow")
-        
-        workflow_id = workflow_result["workflow_id"]
-        
-        # Wait for completion (with timeout)
-        max_wait_time = 300  # 5 minutes
-        wait_interval = 2    # 2 seconds
-        elapsed_time = 0
-        
-        while elapsed_time < max_wait_time:
-            status_result = await workflow_engine.get_workflow_status(workflow_id)
-            
-            if status_result.get("status") == "completed":
-                # Get the generated content
-                workflow_data = await database_service.get_workflow(workflow_id)
-                
-                if workflow_data and workflow_data.get("final_content"):
-                    return {
-                        "success": True,
-                        "blog_post": workflow_data["final_content"],
-                        "workflow_id": workflow_id,
-                        "timestamp": datetime.utcnow().isoformat()
-                    }
-                break
-            elif status_result.get("status") == "failed":
-                raise AgentException(f"Blog generation failed: {status_result.get('error', 'Unknown error')}")
-            
-            await asyncio.sleep(wait_interval)
-            elapsed_time += wait_interval
+        if result.state.status == "completed" and result.state.final_content:
+            return {
+                "success": True,
+                "blog_post": result.state.final_content,
+                "workflow_id": workflow_id,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        elif result.state.status == "failed":
+            raise AgentException(f"Blog generation failed: {result.state.error_message or 'Unknown error'}")
+        else:
+            # Return partial result if available
+            return {
+                "success": False,
+                "message": "Content generation in progress",
+                "workflow_id": workflow_id,
+                "status": result.state.status,
+                "timestamp": datetime.utcnow().isoformat()
+            }
         
         # If we get here, the workflow didn't complete in time
         return {
@@ -360,61 +364,50 @@ async def generate_social_post(
         # Validate input
         validate_workflow_input(request)
         
-        # Add platform to request
-        request["platform"] = platform
-        request["content_type"] = "social_post"
+        # Build structured input
+        from uuid import uuid4
+        from src.agents.workflow_coordinator import WorkflowCoordinator
+        from src.models import ContentState
         
-        # Create workflow for social post generation
-        workflow_request = CreateWorkflowRequest(
-            input=request,
+        workflow_id = str(uuid4())
+        structured_input = {
+            "text": request.get("text_content", ""),
+            "content_type": "social_post",
+            "platform": platform,
+            "llm_model": request.get("llm_model", "mistral")
+        }
+        
+        state = ContentState(
+            workflow_id=workflow_id,
+            status="initiated",
+            original_input=structured_input,
             user_id=user_id
         )
         
-        # Start workflow
-        workflow_result = await workflow_engine.create_workflow(workflow_request.dict())
+        # Execute workflow synchronously using coordinator
+        coordinator = WorkflowCoordinator()
+        result = coordinator.run(state)
         
-        if not workflow_result.get("success"):
-            raise AgentException("Failed to create social post generation workflow")
-        
-        workflow_id = workflow_result["workflow_id"]
-        
-        # Wait for completion (shorter timeout for social posts)
-        max_wait_time = 120  # 2 minutes
-        wait_interval = 1    # 1 second
-        elapsed_time = 0
-        
-        while elapsed_time < max_wait_time:
-            status_result = await workflow_engine.get_workflow_status(workflow_id)
-            
-            if status_result.get("status") == "completed":
-                # Get the generated content
-                workflow_data = await database_service.get_workflow(workflow_id)
-                
-                if workflow_data and workflow_data.get("final_content"):
-                    return {
-                        "success": True,
-                        "social_post": workflow_data["final_content"],
-                        "platform": platform,
-                        "workflow_id": workflow_id,
-                        "timestamp": datetime.utcnow().isoformat()
-                    }
-                break
-            elif status_result.get("status") == "failed":
-                raise AgentException(f"Social post generation failed: {status_result.get('error', 'Unknown error')}")
-            
-            await asyncio.sleep(wait_interval)
-            elapsed_time += wait_interval
-        
-        # If we get here, the workflow didn't complete in time
-        return {
-            "success": False,
-            "message": "Social post generation is taking longer than expected",
-            "workflow_id": workflow_id,
-            "platform": platform,
-            "status": "in_progress",
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        
+        if result.state.status == "completed" and result.state.final_content:
+            return {
+                "success": True,
+                "social_post": result.state.final_content,
+                "platform": platform,
+                "workflow_id": workflow_id,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        elif result.state.status == "failed":
+            raise AgentException(f"Social post generation failed: {result.state.error_message or 'Unknown error'}")
+        else:
+            return {
+                "success": False,
+                "message": "Content generation in progress",
+                "workflow_id": workflow_id,
+                "platform": platform,
+                "status": result.state.status,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+    
     except ValidationException as e:
         raise HTTPException(status_code=400, detail=str(e))
     except AgentException as e:

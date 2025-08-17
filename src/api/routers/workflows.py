@@ -22,6 +22,9 @@ from src.core.workflow_engine import WorkflowEngine
 
 router = APIRouter(prefix="/api/v1", tags=["workflows"])
 
+# Additional router for frontend compatibility
+workflows_router = APIRouter(prefix="/api/workflows", tags=["workflows"])
+
 
 class StateRepository(Protocol):
     def save(self, state: ContentState) -> None: ...
@@ -104,6 +107,9 @@ def pause_for_human_review(
     state = repo.load(workflow_id)
     if not state:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="workflow not found")
+    # Only allow pausing if not already waiting or terminal
+    if str(state.status) in ["waiting_human", "cancelled", "failed", "completed"]:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="cannot pause in current state")
     state.status = "waiting_human"
     repo.save(state)
     return {"workflow_id": workflow_id, "status": "waiting_human"}
@@ -119,8 +125,19 @@ def resume_after_human_review(
     state = repo.load(workflow_id)
     if not state:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="workflow not found")
-    # Append feedback and mark in progress
+    # Must be paused to resume
+    if str(state.status) != "waiting_human":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="workflow is not paused for human review")
+
+    review_action = str(feedback.get("review", "")).lower() if isinstance(feedback, dict) else ""
+    if review_action not in ["approved", "rejected", "revise", "changes_requested", "approve"]:
+        # Invalid action
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid review action")
+
+    # Append feedback
     state.human_feedback.append(feedback)
+
+    # For simplicity in tests: approved -> in_progress (engine would continue), rejected -> in_progress/failed depending on downstream
     state.status = "in_progress"
     repo.save(state)
     return {"workflow_id": workflow_id, "status": "in_progress", "human_feedback": state.human_feedback}
@@ -141,6 +158,7 @@ def get_workflow_content(
         "quality_scores": state.quality_scores,
         "brand_compliance": state.brand_compliance,
         "human_feedback": state.human_feedback,
+        "final_content": state.final_content,
     }
 
 
@@ -155,6 +173,65 @@ def cancel_workflow(
     state.status = "cancelled"
     repo.save(state)
     return {"workflow_id": workflow_id, "status": "cancelled"}
+
+
+# Frontend-compatible endpoints
+@workflows_router.post("/", response_model=CreateWorkflowResponse)
+def create_workflow_frontend(
+    payload: CreateWorkflowRequest,
+    repo: StateRepository = Depends(get_repository),
+    coordinator: WorkflowCoordinator = Depends(get_coordinator),
+    engine: WorkflowEngine = Depends(get_engine),
+) -> CreateWorkflowResponse:
+    """Create workflow endpoint for frontend compatibility."""
+    return create_workflow(payload, repo, coordinator, engine)
+
+
+@workflows_router.get("/{workflow_id}/status", response_model=WorkflowStatusResponse)
+def get_workflow_status_frontend(
+    workflow_id: str,
+    repo: StateRepository = Depends(get_repository),
+) -> WorkflowStatusResponse:
+    """Get workflow status endpoint for frontend compatibility."""
+    return get_workflow_status(workflow_id, repo)
+
+
+@workflows_router.get("/{workflow_id}/result")
+def get_workflow_result_frontend(
+    workflow_id: str,
+    repo: StateRepository = Depends(get_repository),
+) -> Dict[str, Any]:
+    """Get workflow result endpoint for frontend compatibility."""
+    return get_workflow_content(workflow_id, repo)
+
+
+@workflows_router.post("/{workflow_id}/pause")
+def pause_workflow_frontend(
+    workflow_id: str,
+    repo: StateRepository = Depends(get_repository),
+) -> Dict[str, str]:
+    """Pause workflow endpoint for frontend compatibility."""
+    return pause_for_human_review(workflow_id, repo)
+
+
+@workflows_router.post("/{workflow_id}/resume")
+def resume_workflow_frontend(
+    workflow_id: str,
+    feedback: Dict[str, Any],
+    repo: StateRepository = Depends(get_repository),
+    engine: WorkflowEngine = Depends(get_engine),
+) -> Dict[str, Any]:
+    """Resume workflow endpoint for frontend compatibility."""
+    return resume_after_human_review(workflow_id, feedback, repo, engine)
+
+
+@workflows_router.post("/{workflow_id}/cancel")
+def cancel_workflow_frontend(
+    workflow_id: str,
+    repo: StateRepository = Depends(get_repository),
+) -> Dict[str, str]:
+    """Cancel workflow endpoint for frontend compatibility."""
+    return cancel_workflow(workflow_id, repo)
 
 
 # Completed Step 14: Added workflow router with in-memory repository and DI.

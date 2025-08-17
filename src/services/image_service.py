@@ -1,6 +1,9 @@
+#!/usr/bin/env python3
 """
-Image Service for ViraLearn ContentBot.
-Handles Imagen 4 API integration for image generation and processing.
+Image Service Module
+
+Provides image generation capabilities using HuggingFace Inference API
+with Google Cloud Imagen as fallback.
 """
 
 import asyncio
@@ -13,14 +16,20 @@ from enum import Enum
 import time
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
-import httpx
-
 from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
-# Optional Google Cloud imports
+# HuggingFace imports
+try:
+    import requests
+    HUGGINGFACE_AVAILABLE = True
+except ImportError:
+    requests = None
+    HUGGINGFACE_AVAILABLE = False
+    logger.warning("Requests library not available. Image generation will use fallback mode.")
+
+# Optional Google Cloud imports (fallback)
 try:
     from google.cloud import aiplatform
     from google.cloud.aiplatform_v1.types import prediction_service
@@ -29,20 +38,11 @@ except ImportError:
     aiplatform = None
     prediction_service = None
     GOOGLE_CLOUD_AVAILABLE = False
-    logger.warning("Google Cloud AI Platform not available. Image generation will use fallback mode.")
-
-# Optional Hugging Face imports
-try:
-    from huggingface_hub import InferenceClient
-    HUGGINGFACE_AVAILABLE = True
-except ImportError:
-    InferenceClient = None
-    HUGGINGFACE_AVAILABLE = False
-    logger.warning("Hugging Face hub not available. Install huggingface-hub for free image generation.")
 
 
 class ImageStyle(Enum):
-    """Image generation styles."""
+    """Supported image styles."""
+    NONE = "none"
     REALISTIC = "realistic"
     ARTISTIC = "artistic"
     CARTOON = "cartoon"
@@ -60,37 +60,34 @@ class ImageFormat(Enum):
 
 
 class HuggingFaceModel(Enum):
-    """Available Hugging Face models for free image generation."""
-    FLUX_SCHNELL = "black-forest-labs/FLUX.1-schnell"
+    """Available HuggingFace models for image generation."""
     STABLE_DIFFUSION_XL = "stabilityai/stable-diffusion-xl-base-1.0"
-    STABLE_DIFFUSION_V1_5 = "runwayml/stable-diffusion-v1-5"
-    DREAMSHAPER = "Lykon/DreamShaper"
-    OPENJOURNEY = "prompthero/openjourney"
+    STABLE_DIFFUSION_2_1 = "stabilityai/stable-diffusion-2-1"
+    FLUX_SCHNELL = "black-forest-labs/FLUX.1-schnell"
+    FLUX_DEV = "black-forest-labs/FLUX.1-dev"
 
 
 @dataclass
 class ImageGenerationRequest:
-    """Request structure for image generation."""
+    """Request for image generation."""
     prompt: str
     style: ImageStyle = ImageStyle.REALISTIC
     aspect_ratio: str = "1:1"  # "1:1", "16:9", "4:3", "9:16"
-    size: Tuple[int, int] = (1024, 1024)
+    width: int = 1024
+    height: int = 1024
     format: ImageFormat = ImageFormat.JPEG
-    quality: int = 90
+    num_images: int = 1
     seed: Optional[int] = None
-    guidance_scale: float = 7.5
-    num_inference_steps: int = 50
-    model: Optional[HuggingFaceModel] = HuggingFaceModel.FLUX_SCHNELL
-    use_huggingface: bool = True
 
 
 @dataclass
 class ImageGenerationResponse:
-    """Response structure for image generation."""
-    images: List[bytes]
-    metadata: Dict[str, Any]
-    generation_time: float
+    """Response from image generation."""
+    images: List[str]  # Base64 encoded images
     model: str
+    provider: str
+    prompt: str
+    generation_time: float = 0.0
 
 
 class ImageServiceError(Exception):
@@ -99,522 +96,213 @@ class ImageServiceError(Exception):
 
 
 class ImageService:
-    """Service for interacting with Imagen 4 API."""
+    """Service for image generation using HuggingFace and Google Cloud fallback."""
     
-    def __init__(self):
+    def __init__(self, provider: str = "huggingface"):
         self.settings = get_settings()
+        self.provider = provider.lower()
         self.client = None
         self.endpoint = None
+        self.hf_api_url = "https://api-inference.huggingface.co/models/"
+        self.hf_headers = {}
         self._initialized = False
         
-        # Hugging Face Inference Client
-        self.hf_client = None
-        
-        # Platform-specific aspect ratios
-        self.platform_aspects = {
-            "twitter": {"1:1": (1080, 1080), "16:9": (1200, 675)},
-            "linkedin": {"1:1": (1200, 1200), "16:9": (1200, 628)},
-            "instagram": {"1:1": (1080, 1080), "4:5": (1080, 1350)},
-            "facebook": {"1:1": (1200, 1200), "16:9": (1200, 630)},
-        }
-    
     async def initialize(self) -> None:
-        """Initialize the image service with Imagen API and/or Hugging Face models."""
+        """Initialize the image service with the selected provider."""
         if self._initialized:
             return
         
-        # Try to initialize Hugging Face first (free option)
-        if HUGGINGFACE_AVAILABLE:
-            try:
-                logger.info("Initializing Hugging Face Inference API")
-                self.hf_client = InferenceClient(token=self.settings.huggingface.api_token)
-                logger.info("Hugging Face Inference API initialized successfully")
-            except Exception as e:
-                logger.warning(f"Failed to initialize Hugging Face Inference API: {e}")
-                self.hf_client = None
-        
-        # Try to initialize Google Cloud as backup
-        if GOOGLE_CLOUD_AVAILABLE:
-            try:
-                # Initialize Google Cloud AI Platform with service account credentials
-                aiplatform.init(
-                    project=self.settings.imagen.project_id,
-                    location=self.settings.imagen.location
-                    # Uses GOOGLE_APPLICATION_CREDENTIALS environment variable
-                )
-                
-                self.client = aiplatform.gapic.PredictionServiceClient()
-                self.endpoint = f"projects/{self.settings.imagen.project_id}/locations/{self.settings.imagen.location}/publishers/google/models/{self.settings.imagen.model_name}"
-                
-                logger.info(f"Google Cloud Image Service initialized with model: {self.settings.imagen.model_name}")
-                
-            except Exception as e:
-                logger.error(f"Failed to initialize Google Cloud Image Service: {e}")
-        
-        if not HUGGINGFACE_AVAILABLE and not GOOGLE_CLOUD_AVAILABLE:
-            logger.warning("Neither Hugging Face nor Google Cloud available. Image service will run in mock mode.")
+        if self.provider == "huggingface":
+            await self._initialize_huggingface()
+        elif self.provider == "google":
+            await self._initialize_google_cloud()
+        else:
+            logger.warning(f"Unknown provider: {self.provider}. Falling back to HuggingFace.")
+            self.provider = "huggingface"
+            await self._initialize_huggingface()
         
         self._initialized = True
     
-    async def _generate_with_hf_api(self, request: ImageGenerationRequest) -> bytes:
-        """Generate image using Hugging Face Inference API."""
-        if not HUGGINGFACE_AVAILABLE or not self.hf_client:
-            logger.error("Hugging Face client not available")
-            raise ImageServiceError("Hugging Face client not available")
+    async def _initialize_huggingface(self) -> None:
+        """Initialize HuggingFace provider."""
+        if not HUGGINGFACE_AVAILABLE:
+            logger.warning("Requests library not available. Cannot initialize HuggingFace.")
+            return
         
         try:
-            # Enhance prompt with style
-            enhanced_prompt = self._enhance_prompt(request.prompt, request.style)
+            # Set up HuggingFace API headers
+            token = getattr(self.settings.huggingface, 'api_token', None) if hasattr(self.settings, 'huggingface') else None
+            if token:
+                self.hf_headers = {
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json"
+                }
+                logger.info("✅ HuggingFace Image Service initialized (token present)")
+            else:
+                # Use without auth (rate limited)
+                self.hf_headers = {"Content-Type": "application/json"}
+                logger.warning("HuggingFace API token not found. Using rate-limited access.")
+                logger.info("✅ HuggingFace Image Service initialized (no token)")
             
-            logger.info(f"Generating image with {request.model.value} via Hugging Face Inference API")
-            logger.info(f"Enhanced prompt: {enhanced_prompt}")
-            
-            # Generate image using Inference API
-            image = self.hf_client.text_to_image(
-                prompt=enhanced_prompt,
-                model=request.model.value
+        except Exception as e:
+            logger.error(f"Failed to initialize HuggingFace service: {e}")
+            raise ImageServiceError(f"HuggingFace service initialization failed: {e}")
+    
+    async def _initialize_google_cloud(self) -> None:
+        """Initialize Google Cloud provider."""
+        if not GOOGLE_CLOUD_AVAILABLE:
+            raise ImageServiceError("Google Cloud AI Platform not available. Please install google-cloud-aiplatform.")
+        
+        try:
+            # Initialize Google Cloud AI Platform with service account credentials
+            aiplatform.init(
+                project=self.settings.imagen.project_id,
+                location=self.settings.imagen.location
+                # Uses GOOGLE_APPLICATION_CREDENTIALS environment variable
             )
             
-            # Convert PIL image to bytes
-            img_buffer = io.BytesIO()
-            image.save(img_buffer, format=request.format.value.upper())
+            self.client = aiplatform.gapic.PredictionServiceClient()
+            self.endpoint = f"projects/{self.settings.imagen.project_id}/locations/{self.settings.imagen.location}/publishers/google/models/{self.settings.imagen.model_name}"
             
-            logger.info(f"Successfully generated image with {request.model.value}")
-            return img_buffer.getvalue()
+            logger.info(f"Google Cloud Image Service initialized with model: {self.settings.imagen.model_name}")
             
-        except StopIteration as e:
-            logger.error(f"Hugging Face provider configuration error: {e}")
-            logger.info("This usually means the model is not available or there's a provider issue")
-            # Try with a different model if the current one fails
-            if request.model != HuggingFaceModel.FLUX_SCHNELL:
-                logger.info("Retrying with FLUX_SCHNELL model")
-                request.model = HuggingFaceModel.FLUX_SCHNELL
-                return await self._generate_with_hf_api(request)
-            raise ImageServiceError(f"Hugging Face model not available: {e}")
         except Exception as e:
-            logger.error(f"Hugging Face Inference API generation failed: {e}")
-            logger.error(f"Error type: {type(e).__name__}")
-            import traceback
-            logger.error(f"Full traceback: {traceback.format_exc()}")
-            raise ImageServiceError(f"Hugging Face generation failed: {e}")
+            logger.error(f"Failed to initialize Google Cloud Image Service: {e}")
+            raise ImageServiceError(f"Failed to initialize Google Cloud Image Service: {e}")
     
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-
-    async def generate_image(
-        self, 
-        request: ImageGenerationRequest,
-        retry_count: int = 0
-    ) -> ImageGenerationResponse:
-        """
-        Generate image using Hugging Face models, Imagen 4 API, or fallback to mock generation.
+    async def _generate_with_huggingface(self, request: ImageGenerationRequest) -> ImageGenerationResponse:
+        """Generate image using HuggingFace Inference API."""
+        if not HUGGINGFACE_AVAILABLE:
+            raise ImageServiceError("Requests library not available for HuggingFace")
         
-        Args:
-            request: Image generation request with prompt and parameters
-            retry_count: Current retry attempt (for internal use)
-            
-        Returns:
-            ImageGenerationResponse with generated images and metadata
-            
-        Raises:
-            ImageServiceError: If generation fails after retries
-        """
-        if not self._initialized:
-            await self.initialize()
+        start_time = time.time()
         
-        # Prioritize Hugging Face Inference API (free option)
-        if request.use_huggingface and HUGGINGFACE_AVAILABLE and self.hf_client:
-            try:
-                start_time = time.time()
-                hf_image = await self._generate_with_hf_api(request)
-                generation_time = time.time() - start_time
-                
-                return ImageGenerationResponse(
-                    images=[hf_image],
-                    metadata={
-                        "prompt": request.prompt,
-                        "style": request.style.value,
-                        "size": request.size,
-                        "model": request.model.value,
-                        "huggingface_api_mode": True
-                    },
-                    generation_time=generation_time,
-                    model=request.model.value
-                )
-            except Exception as e:
-                logger.error(f"Hugging Face Inference API generation failed: {e}")
-                raise ImageServiceError(f"Hugging Face generation failed: {e}")
-        
-        # Fallback to Google Cloud if available
-        if GOOGLE_CLOUD_AVAILABLE and self.client is not None:
-            try:
-                start_time = time.time()
-                
-                # Prepare the prompt with style
-                enhanced_prompt = self._enhance_prompt(request.prompt, request.style)
-                
-                # Generate image with Google Cloud
-                response = await self._generate_with_retry(
-                    enhanced_prompt, 
-                    request, 
-                    retry_count
-                )
-                
-                generation_time = time.time() - start_time
-                
-                return ImageGenerationResponse(
-                    images=[response],
-                    metadata={
-                        "prompt": request.prompt,
-                        "style": request.style.value,
-                        "size": request.size,
-                        "google_cloud_mode": True
-                    },
-                    generation_time=generation_time,
-                    model=self.settings.imagen.model_name
-                )
-            except Exception as e:
-                logger.error(f"Google Cloud generation failed: {e}")
-                raise ImageServiceError(f"Google Cloud generation failed: {e}")
-        
-        # No fallback - raise error if all services fail
-        logger.error("All image generation services failed")
-        
-        # Retry logic
-        if retry_count < self.settings.imagen.max_retries:
-            logger.info(f"Retrying image generation (attempt {retry_count + 1}/{self.settings.imagen.max_retries})")
-            await asyncio.sleep(2 ** retry_count)  # Exponential backoff
-            return await self.generate_image(request, retry_count + 1)
-        
-        raise ImageServiceError(f"Image generation failed after {self.settings.imagen.max_retries} retries: No image generation services available")
-    
-    async def _generate_with_retry(
-        self, 
-        prompt: str, 
-        request: ImageGenerationRequest,
-        retry_count: int
-    ) -> Any:
-        """Generate image with retry logic."""
         try:
-            # Prepare the request payload
+            # Use FLUX model as default
+            model = HuggingFaceModel.FLUX_SCHNELL.value
+            api_url = f"{self.hf_api_url}{model}"
+            logger.debug(f"HuggingFace generation request: model={model} url={api_url}")
+            
             payload = {
-                "instances": [{
-                    "prompt": prompt,
-                    "aspect_ratio": request.aspect_ratio,
-                    "guidance_scale": request.guidance_scale,
-                    "num_inference_steps": request.num_inference_steps,
-                }]
+                "inputs": request.prompt,
+                "parameters": {
+                    "num_inference_steps": 4,  # Fast generation for FLUX Schnell
+                    "guidance_scale": 0.0,     # FLUX Schnell doesn't use guidance
+                }
             }
             
-            if request.seed is not None:
-                payload["instances"][0]["seed"] = request.seed
+            timeout = getattr(self.settings.huggingface, 'timeout', 60) if hasattr(self.settings, 'huggingface') else 60
+            response = requests.post(api_url, headers=self.hf_headers, json=payload, timeout=timeout)
             
-            # Make the prediction using the client
-            from google.cloud.aiplatform_v1.types import PredictRequest
-            from google.protobuf import json_format
-            from google.protobuf.struct_pb2 import Value
+            if response.status_code == 200:
+                # HuggingFace returns image bytes
+                image_bytes = response.content
+                image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+                
+                generation_time = time.time() - start_time
+                
+                return ImageGenerationResponse(
+                    images=[f"data:image/{request.format.value};base64,{image_base64}"],
+                    model=model,
+                    provider="huggingface",
+                    prompt=request.prompt,
+                    generation_time=generation_time
+                )
+            else:
+                error_msg = f"HuggingFace API error: {response.status_code} - {response.text}"
+                logger.error(error_msg)
+                raise ImageServiceError(error_msg)
+                
+        except Exception as e:
+            logger.error(f"HuggingFace image generation failed: {e}")
+            raise ImageServiceError(f"HuggingFace generation failed: {e}")
+    
+    async def _generate_with_google_cloud(self, request: ImageGenerationRequest) -> ImageGenerationResponse:
+        """Generate image using Google Cloud Imagen 4."""
+        if not self._initialized:
+            raise ImageServiceError("Google Cloud service not properly initialized")
+        
+        start_time = time.time()
+        
+        try:
+            # Prepare the request for Imagen 4
+            instances = [{
+                "prompt": request.prompt,
+                "sampleCount": request.num_images,
+                "aspectRatio": request.aspect_ratio or "1:1",
+                "safetyFilterLevel": "block_some",
+                "personGeneration": "allow_adult"
+            }]
             
-            # Convert payload to protobuf format
-            instances = []
-            for instance in payload["instances"]:
-                value = Value()
-                json_format.ParseDict(instance, value)
-                instances.append(value)
+            # Add style if specified
+            if request.style and request.style != ImageStyle.NONE:
+                instances[0]["style"] = request.style.value
             
-            predict_request = PredictRequest(
+            # Prepare the prediction request
+            prediction_request = prediction_service.PredictRequest(
                 endpoint=self.endpoint,
                 instances=instances
             )
             
-            # Make async prediction
-            response = await asyncio.get_event_loop().run_in_executor(
-                None, 
-                self.client.predict, 
-                predict_request
+            # Make the prediction
+            response = await self.client.predict(prediction_request)
+            
+            # Process the response
+            images = []
+            for prediction in response.predictions:
+                # Imagen 4 returns base64-encoded images
+                image_data = prediction.get("bytesBase64Encoded", "")
+                if image_data:
+                    images.append(f"data:image/{request.format.value};base64,{image_data}")
+            
+            if not images:
+                raise ImageServiceError("No images generated")
+            
+            generation_time = time.time() - start_time
+            
+            return ImageGenerationResponse(
+                images=images,
+                model="imagen-4",
+                provider="google_cloud",
+                prompt=request.prompt,
+                generation_time=generation_time
             )
             
-            return response
-            
-        except asyncio.TimeoutError:
-            raise ImageServiceError("Image generation request timed out")
         except Exception as e:
-            raise ImageServiceError(f"Image generation failed: {e}")
+            logger.error(f"Google Cloud image generation failed: {e}")
+            raise ImageServiceError(f"Failed to generate image with Google Cloud: {e}")
     
-    def _enhance_prompt(self, prompt: str, style: ImageStyle) -> str:
-        """Enhance prompt with style-specific instructions."""
-        style_enhancements = {
-            ImageStyle.REALISTIC: "high quality, realistic, detailed, professional photography",
-            ImageStyle.ARTISTIC: "artistic, creative, expressive, vibrant colors",
-            ImageStyle.CARTOON: "cartoon style, animated, colorful, fun",
-            ImageStyle.ABSTRACT: "abstract, geometric, modern art, conceptual",
-            ImageStyle.MINIMALIST: "minimalist, clean, simple, elegant",
-            ImageStyle.VINTAGE: "vintage, retro, classic, nostalgic",
-            ImageStyle.MODERN: "modern, contemporary, sleek, sophisticated"
-        }
+    async def generate_image(self, request: ImageGenerationRequest) -> ImageGenerationResponse:
+        """Generate an image using the configured provider."""
+        await self.initialize()
         
-        enhancement = style_enhancements.get(style, "")
-        return f"{prompt}, {enhancement}"
-    
-    async def _optimize_image(
-        self, 
-        image_bytes: bytes, 
-        format: ImageFormat, 
-        quality: int,
-        target_size: Tuple[int, int]
-    ) -> bytes:
-        """Optimize image for target format and size."""
-        try:
-            # Open image
-            image = Image.open(io.BytesIO(image_bytes))
-            
-            # Resize if needed
-            if image.size != target_size:
-                image = image.resize(target_size, Image.Resampling.LANCZOS)
-            
-            # Convert to RGB if saving as JPEG
-            if format == ImageFormat.JPEG and image.mode != 'RGB':
-                image = image.convert('RGB')
-            
-            # Save optimized image
-            output_buffer = io.BytesIO()
-            
-            save_kwargs = {
-                'optimize': True,
-                'quality': quality
-            }
-            
-            if format == ImageFormat.JPEG:
-                image.save(output_buffer, 'JPEG', **save_kwargs)
-            elif format == ImageFormat.PNG:
-                image.save(output_buffer, 'PNG', **save_kwargs)
-            elif format == ImageFormat.WEBP:
-                image.save(output_buffer, 'WEBP', **save_kwargs)
-            
-            return output_buffer.getvalue()
-            
-        except Exception as e:
-            logger.error(f"Image optimization failed: {e}")
-            return image_bytes  # Return original if optimization fails
-    
-    async def create_social_graphics(
-        self, 
-        content: str, 
-        platform: str, 
-        style: ImageStyle = ImageStyle.MODERN
-    ) -> ImageGenerationResponse:
-        """Create social media graphics with text overlay."""
-        # Get platform-specific dimensions
-        aspect_ratio = "1:1"  # Default
-        if platform in self.platform_aspects:
-            aspect_ratio = "1:1"  # Use square for text overlays
-        
-        size = self.platform_aspects.get(platform, {}).get(aspect_ratio, (1080, 1080))
-        
-        # Create a prompt for the background
-        background_prompt = f"professional social media background, {style.value} style, clean, modern"
-        
-        request = ImageGenerationRequest(
-            prompt=background_prompt,
-            style=style,
-            aspect_ratio=aspect_ratio,
-            size=size,
-            format=ImageFormat.PNG,  # Use PNG for transparency
-            quality=95
-        )
-        
-        response = await self.generate_image(request)
-        
-        # Add text overlay to the first image
-        if response.images:
-            image_with_text = await self._add_text_overlay(
-                response.images[0], 
-                content, 
-                platform
-            )
-            response.images[0] = image_with_text
-        
-        return response
-    
-    async def _add_text_overlay(
-        self, 
-        image_bytes: bytes, 
-        text: str, 
-        platform: str
-    ) -> bytes:
-        """Add text overlay to image."""
-        try:
-            # Open image
-            image = Image.open(io.BytesIO(image_bytes))
-            
-            # Create a drawing object
-            draw = ImageDraw.Draw(image)
-            
-            # Calculate text position and size
-            width, height = image.size
-            font_size = min(width, height) // 20  # Responsive font size
-            
-            # Try to load a font, fallback to default
-            try:
-                font = ImageFont.truetype("arial.ttf", font_size)
-            except:
-                font = ImageFont.load_default()
-            
-            # Wrap text to fit image width
-            words = text.split()
-            lines = []
-            current_line = ""
-            
-            for word in words:
-                test_line = current_line + " " + word if current_line else word
-                bbox = draw.textbbox((0, 0), test_line, font=font)
-                text_width = bbox[2] - bbox[0]
-                
-                if text_width <= width * 0.8:  # Leave 10% margin on each side
-                    current_line = test_line
-                else:
-                    if current_line:
-                        lines.append(current_line)
-                    current_line = word
-            
-            if current_line:
-                lines.append(current_line)
-            
-            # Calculate total text height
-            line_height = font_size * 1.2
-            total_text_height = len(lines) * line_height
-            
-            # Position text in center
-            y_start = (height - total_text_height) // 2
-            
-            # Draw each line
-            for i, line in enumerate(lines):
-                bbox = draw.textbbox((0, 0), line, font=font)
-                text_width = bbox[2] - bbox[0]
-                x = (width - text_width) // 2
-                y = y_start + i * line_height
-                
-                # Draw text with outline for better visibility
-                outline_color = (0, 0, 0)
-                text_color = (255, 255, 255)
-                
-                # Draw outline
-                for dx in [-2, -1, 0, 1, 2]:
-                    for dy in [-2, -1, 0, 1, 2]:
-                        draw.text((x + dx, y + dy), line, font=font, fill=outline_color)
-                
-                # Draw main text
-                draw.text((x, y), line, font=font, fill=text_color)
-            
-            # Save the image
-            output_buffer = io.BytesIO()
-            image.save(output_buffer, 'PNG', optimize=True)
-            return output_buffer.getvalue()
-            
-        except Exception as e:
-            logger.error(f"Text overlay failed: {e}")
-            return image_bytes  # Return original if text overlay fails
-    
-    async def generate_content_images(
-        self, 
-        prompt: str, 
-        style: ImageStyle,
-        count: int = 1
-    ) -> ImageGenerationResponse:
-        """Generate multiple content images with consistent style."""
-        request = ImageGenerationRequest(
-            prompt=prompt,
-            style=style,
-            aspect_ratio="16:9",  # Good for content
-            size=(1920, 1080),
-            format=ImageFormat.JPEG,
-            quality=90
-        )
-        
-        # Generate multiple images
-        all_images = []
-        all_metadata = []
-        total_time = 0
-        
-        for i in range(count):
-            response = await self.generate_image(request)
-            all_images.extend(response.images)
-            all_metadata.append(response.metadata)
-            total_time += response.generation_time
-        
-        return ImageGenerationResponse(
-            images=all_images,
-            metadata={
-                "prompt": prompt,
-                "style": style.value,
-                "count": count,
-                "individual_metadata": all_metadata,
-                "model": self.settings.imagen.model_name,
-            },
-            generation_time=total_time,
-            model=self.settings.imagen.model_name
-        )
+        if self.provider == "huggingface":
+            return await self._generate_with_huggingface(request)
+        elif self.provider == "google":
+            return await self._generate_with_google_cloud(request)
+        else:
+            # Fallback to HuggingFace
+            logger.warning(f"Unknown provider {self.provider}, falling back to HuggingFace")
+            return await self._generate_with_huggingface(request)
     
     async def health_check(self) -> Dict[str, Any]:
         """Check the health of the image service."""
-        try:
-            if not self._initialized:
-                return {"status": "not_initialized", "error": "Service not initialized"}
-            
-            # Test with a simple prompt
-            test_request = ImageGenerationRequest(
-                prompt="simple geometric shape, test image",
-                style=ImageStyle.MINIMALIST,
-                size=(512, 512),
-                format=ImageFormat.JPEG,
-                quality=80
-            )
-            
-            response = await self.generate_image(test_request)
-            
-            return {
-                "status": "healthy",
-                "model": self.settings.imagen.model_name,
-                "generation_time": response.generation_time,
-                "images_generated": len(response.images)
-            }
-            
-        except Exception as e:
-            return {"status": "unhealthy", "error": str(e)}
+        await self.initialize()
+        
+        return {
+            "status": "healthy" if self._initialized else "unhealthy",
+            "provider": self.provider,
+            "huggingface_available": HUGGINGFACE_AVAILABLE,
+            "google_cloud_available": GOOGLE_CLOUD_AVAILABLE,
+            "initialized": self._initialized
+        }
 
 
-# Global image service instance
+# Global instance
 image_service = ImageService()
 
 
 async def get_image_service() -> ImageService:
     """Get the global image service instance."""
-    if not image_service._initialized:
-        await image_service.initialize()
+    await image_service.initialize()
     return image_service

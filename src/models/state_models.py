@@ -47,7 +47,10 @@ class ContentState(BaseModel):
     analysis_data: Optional[Dict[str, Any]] = Field(default=None)
     text_content: Dict[str, str] = Field(default_factory=dict)
     image_content: Dict[str, str] = Field(default_factory=dict)
+    audio_content: Optional[Dict[str, Any]] = Field(default=None)
     platform_content: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    # Aggregated final content snapshot for easy API consumption
+    final_content: Optional[Dict[str, Any]] = Field(default=None)
 
     # Quality Control
     quality_scores: Dict[str, float] = Field(default_factory=dict)

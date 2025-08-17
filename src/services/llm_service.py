@@ -160,7 +160,7 @@ class LLMService:
         retry_count: int = 0
     ) -> GenerationResponse:
         """
-        Generate content using the selected provider (Gemini, Mistral, or fallback).
+        Generate content using the selected provider (Gemini or Mistral).
         
         Args:
             request: Generation request with prompt and parameters
@@ -175,12 +175,21 @@ class LLMService:
         if not self._initialized:
             await self.initialize()
         
+        # Use the specified provider
         if self.provider == "gemini":
+            if not GOOGLE_AI_AVAILABLE:
+                raise LLMServiceError("Gemini AI is not available. Please install google-generativeai package.")
+            if not self.settings.gemini.api_key:
+                raise LLMServiceError("Gemini API key is not configured. Please set GEMINI_API_KEY environment variable.")
             return await self._generate_with_gemini(request, retry_count)
         elif self.provider == "mistral":
+            if not MISTRAL_AI_AVAILABLE:
+                raise LLMServiceError("Mistral AI is not available. Please install mistralai package.")
+            if not self.settings.mistral.api_key:
+                raise LLMServiceError("Mistral API key is not configured. Please set MISTRAL_API_KEY environment variable.")
             return await self._generate_with_mistral(request, retry_count)
         else:
-            raise LLMServiceError(f"Unsupported provider: {self.provider}")
+            raise LLMServiceError(f"Unsupported provider: {self.provider}. Supported providers are 'gemini' and 'mistral'.")
     
     async def _generate_with_gemini(
         self, 
@@ -394,48 +403,7 @@ class LLMService:
             
             raise LLMServiceError(f"Generation failed: {e}")
     
-    async def _generate_with_huggingface_fallback(self, prompt: str, config: Dict[str, Any]) -> Any:
-        """Fallback to Hugging Face API when Gemini quota is exceeded."""
-        logger.info("Using Hugging Face fallback for content generation")
-        
-        # Use a text generation model from Hugging Face
-        model_name = "microsoft/DialoGPT-medium"  # Fallback model
-        api_url = f"https://api-inference.huggingface.co/models/{model_name}"
-        
-        headers = {}
-        if self.settings.huggingface.api_token:
-            headers["Authorization"] = f"Bearer {self.settings.huggingface.api_token}"
-        
-        payload = {
-            "inputs": prompt,
-            "parameters": {
-                "max_new_tokens": config.get("max_output_tokens", 512),
-                "temperature": config.get("temperature", 0.7),
-                "top_p": config.get("top_p", 0.9),
-                "do_sample": True,
-                "return_full_text": False
-            }
-        }
-        
-        async with httpx.AsyncClient(timeout=self.settings.huggingface.timeout) as client:
-            response = await client.post(api_url, headers=headers, json=payload)
-            
-            if response.status_code == 200:
-                result = response.json()
-                if isinstance(result, list) and len(result) > 0:
-                    # Create a mock response object similar to Gemini's response
-                    class MockResponse:
-                        def __init__(self, text):
-                            self.text = text
-                            self.usage_metadata = None
-                            self.candidates = None
-                    
-                    generated_text = result[0].get("generated_text", "")
-                    return MockResponse(generated_text)
-                else:
-                    raise Exception("Invalid response format from Hugging Face")
-            else:
-                raise Exception(f"Hugging Face API error: {response.status_code} - {response.text}")
+
     
     def _build_prompt(self, request: GenerationRequest) -> str:
         """Build the full prompt with system message and context."""

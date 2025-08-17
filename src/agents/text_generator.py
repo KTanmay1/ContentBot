@@ -16,6 +16,13 @@ class TextGenerator(BaseAgent):
     
     def execute(self, state: ContentState) -> ContentState:
         """Generate text content based on the current state."""
+        # Extract LLM model preference from input
+        llm_model = state.original_input.get("llm_model", "gemini")
+        
+        # Update LLM service provider if different from current
+        if self.llm_service.provider != llm_model:
+            self.llm_service = LLMService(provider=llm_model)
+        
         # Ensure LLM service is initialized
         if not self.llm_service._initialized:
             import asyncio
@@ -41,10 +48,13 @@ class TextGenerator(BaseAgent):
         else:
             prompt = self._create_general_prompt(topic, plan)
         
+        # Determine max_tokens based on content length preference
+        max_tokens = self._get_max_tokens_for_length(state.original_input.get("length", "medium"))
+        
         try:
             request = GenerationRequest(
                 prompt=prompt,
-                max_tokens=1000,
+                max_tokens=max_tokens,
                 temperature=0.7
             )
             # Use sync method for content generation (now uses real Gemini API)
@@ -56,8 +66,13 @@ class TextGenerator(BaseAgent):
             state.text_content["content_type"] = content_type
             
         except Exception as e:
-            # Raise the exception instead of providing fallback content
-            raise e
+            # Provide fallback content when LLM service fails
+            fallback_content = self._generate_fallback_content(topic, content_type, platform)
+            state.text_content["generated"] = fallback_content
+            state.text_content["prompt_used"] = prompt
+            state.text_content["content_type"] = content_type
+            state.text_content["fallback_used"] = True
+            state.text_content["error"] = str(e)
         
         return state
     
@@ -100,7 +115,56 @@ class TextGenerator(BaseAgent):
         if plan.get("format"):
             base_prompt += f"\n\nFormat: {plan['format']}"
         
-        if plan.get("length"):
-            base_prompt += f"\n\nLength: {plan['length']}"
-        
         return base_prompt
+    
+    def _generate_fallback_content(self, topic: str, content_type: str, platform: str) -> str:
+        """Generate fallback content when LLM service is unavailable."""
+        if content_type == "blog":
+            return f"""# {topic}
+
+This is a comprehensive blog post about {topic}. 
+
+## Introduction
+{topic} is an important topic that deserves careful consideration and analysis.
+
+## Key Points
+- Understanding the fundamentals of {topic}
+- Exploring the implications and applications
+- Best practices and recommendations
+
+## Conclusion
+In conclusion, {topic} represents a significant area of interest that continues to evolve and impact various aspects of our work and daily lives.
+
+*Note: This content was generated using fallback mode due to service unavailability.*"""
+        
+        elif content_type == "social":
+            if platform.lower() == "twitter":
+                return f"Exploring the fascinating world of {topic}! 🚀 What are your thoughts? #AI #Technology #Innovation"
+            elif platform.lower() == "linkedin":
+                return f"Sharing insights on {topic}. This emerging field continues to shape how we approach modern challenges. What's your experience with {topic}? Let's discuss in the comments."
+            else:
+                return f"Excited to share some thoughts on {topic}! 💡 This topic has so much potential. #innovation #technology"
+        
+        else:
+            return f"""Content about {topic}
+
+This content explores the key aspects of {topic}, providing valuable insights and practical information for readers interested in this subject.
+
+Key highlights:
+- Overview of {topic}
+- Important considerations
+- Practical applications
+
+*Note: This content was generated using fallback mode due to service unavailability.*"""
+
+    # NEW: Map length preference to sensible max_tokens defaults
+    def _get_max_tokens_for_length(self, length_pref: str) -> int:
+        length_map = {
+            "short": 700,
+            "medium": 1500,
+            "long": 2500,
+            "comprehensive": 4000,
+            "very_long": 5000,
+        }
+        # Fallback to medium if unknown
+        return length_map.get(str(length_pref).lower(), 1500)

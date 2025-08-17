@@ -223,6 +223,9 @@ class WorkflowEngine:
         return self._build_default_conditional_graph(monitoring, with_memory=with_memory, interrupt_before_human=interrupt_before_human)
 
     def execute(self, state: ContentState) -> ContentState:
+        # Explicitly error when no agents are configured to align with unit tests
+        if not self.agents:
+            raise Exception("No agents configured for WorkflowEngine")
         monitoring = get_monitoring(state.workflow_id)
         compiled = self._compile_graph(monitoring)
         out = compiled.invoke({"content_state": state})
@@ -234,6 +237,9 @@ class WorkflowEngine:
         return result
 
     async def execute_async(self, state: ContentState) -> ContentState:
+        # Explicitly error when no agents are configured to align with unit tests
+        if not self.agents:
+            raise Exception("No agents configured for WorkflowEngine")
         monitoring = get_monitoring(state.workflow_id)
         compiled = self._compile_graph(monitoring)
         out = await compiled.ainvoke({"content_state": state})

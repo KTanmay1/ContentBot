@@ -15,13 +15,19 @@ from starlette.exceptions import HTTPException
 from src.api.middleware.auth import AuthMiddleware
 from src.api.middleware.logging import LoggingMiddleware
 from src.api.middleware.rate_limiting import RateLimitingMiddleware
-from src.api.routers import monitoring, workflows
+from src.api.routers import monitoring, workflows, content
+from src.api.routers.workflows import workflows_router
+from src.api.routers.monitoring import monitoring_router
 from src.core.error_handling import exception_to_payload
 from src.core.monitoring import get_monitoring
 
 
 def create_app(
     *,
+    title: str = "ViraLearn Content Agent API",
+    description: str = "AI-powered content generation and workflow management",
+    version: str = "1.0.0",
+    debug: bool = False,
     cors_origins: list[str] | None = None,
     auth_key: str | None = None,
     rate_limit_capacity: int = 10,
@@ -39,9 +45,10 @@ def create_app(
         Configured FastAPI application instance.
     """
     app = FastAPI(
-        title="ContentBot API",
-        description="AI-powered content generation and workflow management",
-        version="1.0.0",
+        title=title,
+        description=description,
+        version=version,
+        debug=debug,
     )
 
     # CORS middleware
@@ -63,20 +70,37 @@ def create_app(
     )
     app.add_middleware(
         RateLimitingMiddleware,
-        capacity=rate_limit_capacity,
-        refill_rate_per_sec=rate_limit_refill_rate,
+        default_capacity=rate_limit_capacity,
+        default_refill_rate_per_sec=rate_limit_refill_rate,
         key_header="x-client-id",
     )
     app.add_middleware(LoggingMiddleware)
 
     # Include routers
     app.include_router(monitoring.router)
+    app.include_router(monitoring_router)  # Frontend-compatible monitoring endpoints
     app.include_router(workflows.router)
+    app.include_router(workflows_router)  # Frontend-compatible workflows endpoints
+    app.include_router(content.router)
 
     # Root endpoint
     @app.get("/")
-    def root() -> Dict[str, str]:
-        return {"message": "ContentBot API is running"}
+    def root() -> Dict[str, Any]:
+        return {
+            "name": app.title,
+            "version": app.version,
+            "endpoints": {
+                "workflows": [
+                    "/api/v1/workflows",
+                    "/api/v1/workflows/{workflow_id}",
+                    "/api/v1/workflows/{workflow_id}/content",
+                ],
+                "monitoring": [
+                    "/api/v1/health",
+                    "/api/v1/metrics",
+                ],
+            },
+        }
 
     # Health check endpoint (also available at /api/v1/health)
     @app.get("/health")

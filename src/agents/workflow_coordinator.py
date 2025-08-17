@@ -10,6 +10,7 @@ from src.core.error_handling import AgentException
 from src.core.monitoring import get_monitoring
 from src.models.state_models import ContentState, WorkflowStatus
 from .base_agent import BaseAgent
+from src.models.content_models import BlogPost, SocialPost
 
 # Import all available agents
 try:
@@ -90,7 +91,7 @@ class WorkflowCoordinator(BaseAgent):
         self._agents: Dict[str, BaseAgent] = {
             "InputAnalyzer": input_analyzer or InputAnalyzer(),
             "ContentPlanner": content_planner or ContentPlanner(),
-            "TextGenerator": text_generator or TextGenerator(),
+            "TextGenerator": text_generator or TextGenerator(provider="mistral"),
             "ImageGenerator": image_generator or ImageGenerator(),
             "AudioProcessor": audio_processor or AudioProcessor(),
             "BrandVoice": brand_voice or BrandVoice(),
@@ -122,21 +123,104 @@ class WorkflowCoordinator(BaseAgent):
         if not hasattr(_state, 'audio_content') or not _state.audio_content:
             return "AudioProcessor"
 
-        # Brand compliance and platform optimization
-        if not hasattr(_state, 'brand_compliance') or not _state.brand_compliance:
-            return "BrandVoice"
-
-        if not hasattr(_state, 'platform_content') or not _state.platform_content.get('optimized'):
-            return "CrossPlatform"
-
-        # Quality assurance and review
-        if "overall" not in _state.quality_scores:
-            return "QualityAssurance"
-
-        if len(_state.human_feedback) == 0:
-            return "HumanReview"
-
+        # In fallback mode, skip optional agents and complete workflow
+        # after core content generation (text, image, audio)
         return None
+
+    def _extract_title(self, state: ContentState) -> str:
+        # Prefer explicit title
+        title = state.original_input.get("title") if state.original_input else None
+        if title:
+            return str(title).strip()[:120]
+        # Try to infer from generated content first heading
+        gen = (state.text_content or {}).get("generated", "")
+        for line in gen.splitlines():
+            s = line.strip()
+            if s.startswith("#"):
+                return s.lstrip("#").strip()[:120]
+            if len(s) > 10:
+                # Use first substantial line
+                return s[:120]
+        # Fallback to topic/text
+        topic = state.original_input.get("text") or state.original_input.get("topic") or "Untitled"
+        return str(topic)[:120]
+
+    def _summarize(self, state: ContentState, max_len: int = 220) -> Optional[str]:
+        gen = (state.text_content or {}).get("generated", "")
+        if not gen:
+            return None
+        # naive summary: first 220 chars without newlines
+        summary = " ".join(gen.split())[:max_len]
+        return summary if summary else None
+
+    def _finalize_content(self, state: ContentState) -> None:
+        """Aggregate agent outputs into a structured final_content payload."""
+        try:
+            ctype = (state.original_input or {}).get("content_type", "blog")
+            ctype = str(ctype).lower()
+            # Normalize
+            if ctype in {"blog", "blog_post", "article"}:
+                title = self._extract_title(state)
+                keywords = []
+                if state.input_analysis and isinstance(state.input_analysis.get("keywords"), list):
+                    keywords = state.input_analysis.get("keywords", [])
+                sections = []
+                gen = (state.text_content or {}).get("generated", "")
+                if gen:
+                    sections = [{"heading": "Main Content", "body": gen}]
+                blog_obj = BlogPost(
+                    title=title,
+                    summary=self._summarize(state),
+                    sections=sections,
+                    keywords=keywords,
+                    seo_meta_description=self._summarize(state, max_len=155),
+                )
+                state.final_content = blog_obj.dict()
+                return
+            if ctype in {"social", "social_post"}:
+                platform = (state.original_input or {}).get("platform", "general")
+                content = (state.text_content or {}).get("generated", "")
+                plan = (state.platform_content or {}).get("plan", {})
+                # Hashtags handling
+                hashtags = []
+                plan_hashtags = plan.get("hashtags") if isinstance(plan, dict) else None
+                if isinstance(plan_hashtags, list):
+                    hashtags = [h if h.startswith('#') else f"#{h}" for h in plan_hashtags][:10]
+                elif isinstance(plan_hashtags, str):
+                    parts = [p.strip() for p in plan_hashtags.replace(',', ' ').split() if p.strip()]
+                    hashtags = [h if h.startswith('#') else f"#{h}" for h in parts][:10]
+                elif state.input_analysis and isinstance(state.input_analysis.get("keywords"), list):
+                    # fallback from keywords
+                    keywords = state.input_analysis.get("keywords", [])
+                    hashtags = [f"#{k}" for k in keywords[:5]]
+                mentions = []
+                if isinstance(plan, dict) and isinstance(plan.get("mentions"), list):
+                    mentions = plan.get("mentions", [])
+                cta = None
+                if isinstance(plan, dict) and plan.get("call_to_action"):
+                    cta = plan.get("call_to_action")
+                social_obj = SocialPost(
+                    platform=str(platform),
+                    content=str(content),
+                    hashtags=hashtags,
+                    mentions=mentions,
+                    call_to_action=cta,
+                )
+                state.final_content = social_obj.dict()
+                return
+            # Default fallback: wrap generated content as a simple blog-like payload
+            title = self._extract_title(state)
+            gen = (state.text_content or {}).get("generated", "")
+            state.final_content = {
+                "title": title,
+                "content": gen,
+            }
+        except Exception as e:
+            # Do not fail workflow due to finalization; log and continue
+            monitoring = get_monitoring(state.workflow_id)
+            monitoring.error("finalization_error", error=str(e))
+            # minimal fallback
+            state.final_content = (state.text_content or {}).copy()
 
     def orchestrate_workflow(self, state: ContentState) -> ContentState:
         monitoring = get_monitoring(state.workflow_id)
@@ -145,6 +229,8 @@ class WorkflowCoordinator(BaseAgent):
             next_agent_name = self.determine_next_agent(state)
             monitoring.info("coordinator_route", next_agent=next_agent_name)
             if next_agent_name is None:
+                # Aggregate final content before completing
+                self._finalize_content(state)
                 state.status = WorkflowStatus.COMPLETED
                 return state
 

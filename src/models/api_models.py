@@ -7,15 +7,24 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 try:
-    from pydantic import BaseModel
+    from pydantic import BaseModel, field_validator
 except ImportError:  # pragma: no cover - fallback for static analyzers
     class BaseModel:  # type: ignore
         pass
+    def field_validator(*args, **kwargs):  # type: ignore
+        return lambda x: x
 
 
 class CreateWorkflowRequest(BaseModel):
     input: Dict[str, Any]
     user_id: Optional[str] = None
+    
+    @field_validator('input')
+    @classmethod
+    def validate_input_not_empty(cls, v: Dict[str, Any]) -> Dict[str, Any]:
+        if not v:
+            raise ValueError("input cannot be empty")
+        return v
 
 
 class CreateWorkflowResponse(BaseModel):

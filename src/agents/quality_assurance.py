@@ -154,7 +154,10 @@ class QualityAssurance(BaseAgent):
             - "coherence": how well the content flows
             """
             
-            response = await self.llm_service.generate_text(prompt)
+            from src.services.llm_service import GenerationRequest
+            request = GenerationRequest(prompt=prompt)
+            response_obj = await self.llm_service.generate_content(request)
+            response = response_obj.content
             
             import json
             try:
@@ -201,7 +204,10 @@ class QualityAssurance(BaseAgent):
             - "issues": list of specific consistency issues found
             """
             
-            response = await self.llm_service.generate_text(prompt)
+            from src.services.llm_service import GenerationRequest
+            request = GenerationRequest(prompt=prompt)
+            response_obj = await self.llm_service.generate_content(request)
+            response = response_obj.content
             
             import json
             try:
@@ -235,7 +241,10 @@ class QualityAssurance(BaseAgent):
             - "suggestions": list of specific improvements
             """
             
-            response = await self.llm_service.generate_text(prompt)
+            from src.services.llm_service import GenerationRequest
+            request = GenerationRequest(prompt=prompt)
+            response_obj = await self.llm_service.generate_content(request)
+            response = response_obj.content
             
             import json
             try:

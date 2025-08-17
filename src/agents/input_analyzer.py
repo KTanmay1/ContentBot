@@ -43,17 +43,12 @@ class InputAnalyzer(BaseAgent):
             if not input_text:
                 raise ValueError("No input text provided for analysis")
             
-            # Perform analysis using async methods
-            import asyncio
-            try:
-                themes = asyncio.run(self.extract_themes(input_text))
-                sentiment = asyncio.run(self.analyze_sentiment(input_text))
-                keywords = self.extract_keywords(input_text)
-                content_type = self.identify_content_type(input_text)
-                target_audience = asyncio.run(self.identify_target_audience(input_text))
-            except RuntimeError:
-                # If we're already in an event loop, raise the exception
-                raise AgentException("Input analysis failed: Cannot run async methods in sync context")
+            # Perform analysis using sync methods
+            themes = self.extract_themes_sync(input_text)
+            sentiment = self.analyze_sentiment_sync(input_text)
+            keywords = self.extract_keywords(input_text)
+            content_type = self.identify_content_type(input_text)
+            target_audience = self.identify_target_audience_sync(input_text)
             
             # Update state with analysis results
             analysis_data = {
@@ -66,9 +61,7 @@ class InputAnalyzer(BaseAgent):
             }
             
             # Store analysis in state
-            if not state.analysis_data:
-                state.analysis_data = {}
-            state.analysis_data.update(analysis_data)
+            state.input_analysis = analysis_data
             
             return state
             
@@ -94,7 +87,10 @@ class InputAnalyzer(BaseAgent):
             Themes:
             """
             
-            response = await self.llm_service.generate_text(prompt)
+            from src.services.llm_service import GenerationRequest
+            request = GenerationRequest(prompt=prompt)
+            response_obj = await self.llm_service.generate_content(request)
+            response = response_obj.content
             themes = [theme.strip() for theme in response.split(",") if theme.strip()]
             return themes[:5]  # Limit to top 5 themes
             
@@ -121,7 +117,10 @@ class InputAnalyzer(BaseAgent):
             Text: {text}
             """
             
-            response = await self.llm_service.generate_text(prompt)
+            from src.services.llm_service import GenerationRequest
+            request = GenerationRequest(prompt=prompt)
+            response_obj = await self.llm_service.generate_content(request)
+            response = response_obj.content
             # Try to parse JSON response
             import json
             try:
@@ -206,7 +205,10 @@ class InputAnalyzer(BaseAgent):
             Text: {text}
             """
             
-            response = await self.llm_service.generate_text(prompt)
+            from src.services.llm_service import GenerationRequest
+            request = GenerationRequest(prompt=prompt)
+            response_obj = await self.llm_service.generate_content(request)
+            response = response_obj.content
             import json
             try:
                 audience_data = json.loads(response)
@@ -217,8 +219,148 @@ class InputAnalyzer(BaseAgent):
         except Exception as e:
             raise AgentException(f"Failed to identify target audience: {e}")
     
-
+    def extract_themes_sync(self, text: str) -> List[str]:
+        """Extract main themes from the input text (sync version).
+        
+        Args:
+            text: Input text to analyze
+            
+        Returns:
+            List of identified themes
+        """
+        try:
+            prompt = f"""
+            Analyze the following text and extract the main themes. 
+            Return only the themes as a comma-separated list, no explanations.
+            
+            Text: {text}
+            
+            Themes:
+            """
+            
+            from src.services.llm_service import GenerationRequest
+            request = GenerationRequest(prompt=prompt)
+            response_obj = self.llm_service.generate_content_sync(request)
+            response = response_obj.content
+            themes = [theme.strip() for theme in response.split(",") if theme.strip()]
+            return themes[:5]  # Limit to top 5 themes
+            
+        except Exception as e:
+            # Fallback to simple keyword extraction
+            return self.extract_keywords(text)[:3]
     
+    def analyze_sentiment_sync(self, text: str) -> Dict[str, Any]:
+        """Analyze sentiment of the input text (sync version).
+        
+        Args:
+            text: Input text to analyze
+            
+        Returns:
+            Dictionary with sentiment analysis results
+        """
+        try:
+            prompt = f"""
+            Analyze the sentiment of the following text. 
+            Respond with only a JSON object containing:
+            - "polarity": "positive", "negative", or "neutral"
+            - "confidence": a number between 0 and 1
+            - "emotion": primary emotion detected
+            
+            Text: {text}
+            """
+            
+            from src.services.llm_service import GenerationRequest
+            request = GenerationRequest(prompt=prompt)
+            response_obj = self.llm_service.generate_content_sync(request)
+            response = response_obj.content
+            import json
+            try:
+                sentiment_data = json.loads(response)
+                return sentiment_data
+            except json.JSONDecodeError:
+                # Fallback sentiment analysis
+                return self._fallback_sentiment_analysis(text)
+                
+        except Exception as e:
+            # Fallback sentiment analysis
+            return self._fallback_sentiment_analysis(text)
+    
+    def identify_target_audience_sync(self, text: str) -> Dict[str, Any]:
+        """Identify target audience from the input text (sync version).
+        
+        Args:
+            text: Input text to analyze
+            
+        Returns:
+            Dictionary with target audience information
+        """
+        try:
+            prompt = f"""
+            Analyze the following text and identify the target audience.
+            Respond with only a JSON object containing:
+            - "demographics": age group, profession, interests
+            - "tone_preference": formal, casual, technical, friendly
+            - "expertise_level": beginner, intermediate, advanced
+            
+            Text: {text}
+            """
+            
+            from src.services.llm_service import GenerationRequest
+            request = GenerationRequest(prompt=prompt)
+            response_obj = self.llm_service.generate_content_sync(request)
+            response = response_obj.content
+            import json
+            try:
+                audience_data = json.loads(response)
+                return audience_data
+            except json.JSONDecodeError:
+                # Fallback audience analysis
+                return self._fallback_audience_analysis(text)
+                
+        except Exception as e:
+            # Fallback audience analysis
+            return self._fallback_audience_analysis(text)
+    
+    def _fallback_sentiment_analysis(self, text: str) -> Dict[str, Any]:
+        """Fallback sentiment analysis using simple heuristics."""
+        positive_words = ['good', 'great', 'excellent', 'amazing', 'wonderful', 'fantastic', 'love', 'like']
+        negative_words = ['bad', 'terrible', 'awful', 'hate', 'dislike', 'horrible', 'worst', 'disappointing']
+        
+        text_lower = text.lower()
+        positive_count = sum(1 for word in positive_words if word in text_lower)
+        negative_count = sum(1 for word in negative_words if word in text_lower)
+        
+        if positive_count > negative_count:
+            return {"polarity": "positive", "confidence": 0.6, "emotion": "optimistic"}
+        elif negative_count > positive_count:
+            return {"polarity": "negative", "confidence": 0.6, "emotion": "critical"}
+        else:
+            return {"polarity": "neutral", "confidence": 0.5, "emotion": "neutral"}
+    
+    def _fallback_audience_analysis(self, text: str) -> Dict[str, Any]:
+        """Fallback audience analysis using simple heuristics."""
+        text_lower = text.lower()
+        
+        # Simple heuristics for audience detection
+        if any(word in text_lower for word in ['technical', 'api', 'code', 'programming', 'development']):
+            return {
+                "demographics": "developers and technical professionals",
+                "tone_preference": "technical",
+                "expertise_level": "intermediate"
+            }
+        elif any(word in text_lower for word in ['business', 'strategy', 'market', 'revenue', 'growth']):
+            return {
+                "demographics": "business professionals",
+                "tone_preference": "formal",
+                "expertise_level": "intermediate"
+            }
+        else:
+            return {
+                "demographics": "general audience",
+                "tone_preference": "casual",
+                "expertise_level": "beginner"
+            }
+
     async def validate(self, state: ContentState) -> bool:
         """Validate that input analysis can be performed.
         
