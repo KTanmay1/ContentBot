@@ -17,7 +17,7 @@ export default function LandingPage() {
         </div>
 
         <div className="max-w-6xl mx-auto px-6 pt-20 pb-12 text-center">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border bg-white/70 dark:bg-black/30 backdrop-blur text-sm mb-6">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border bg-card/70 backdrop-blur text-sm mb-6">
             <span className="text-muted-foreground">Ribbit: Articles in minutes</span>
           </div>
 
